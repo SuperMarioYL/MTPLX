@@ -1889,19 +1889,23 @@ class _BatchedARGenerationService:
                 top_k=int(getattr(job.sampler, "top_k", 0) or 0),
             )
         rng = np.random.default_rng(job.seed)
-        # Closure-local completion-token histogram. Each sampler is bound to one
-        # sequence and is invoked once per decode step, so counts is updated the
-        # instant a token is produced — before the NEXT sample is drawn. This
-        # avoids the one-step staleness of reading job.tokens at sample time:
-        # emit_token runs after generator.next() returns, but the sampler runs
-        # one step ahead inside next() (mlx-lm's one-step-lookahead pipeline),
-        # so job.tokens is missing the token generated immediately before —
-        # precisely the token a loop-breaking penalty most needs to see. Keeping
-        # the histogram in the closure makes the penalty see that token,
-        # matching the serial generate_ar path's Counter(tokens). Per-sampler
-        # scope also means no cross-request count leakage: mlx-lm keeps
-        # samplers index-aligned with uids across filter()/extend().
-        counts: Counter = Counter()
+        # Closure-local completion-token histogram, seeded from job.tokens at
+        # creation and incremented per sampled token. Each sampler is bound to
+        # one sequence and invoked once per decode step, so counts is updated
+        # the instant a token is produced -- before the NEXT sample is drawn.
+        # This avoids the one-step staleness of reading job.tokens at *sample*
+        # time: emit_token runs after generator.next() returns, but the sampler
+        # runs one step ahead inside next() (mlx-lm's one-step-lookahead
+        # pipeline), so job.tokens is missing the token generated immediately
+        # before -- precisely the token a loop-breaking penalty most needs to
+        # see. Seeding once at creation is not stale: at that moment job.tokens
+        # holds exactly the completion tokens emitted so far, matching the
+        # serial generate_ar path's Counter(tokens); the per-step increment then
+        # keeps counts current for every subsequent sample (no lag) and also
+        # restores history when mlx-lm re-creates the sampler across
+        # filter()/extend(), which an empty counter would lose. Per-sampler
+        # closure scope means no cross-request count leakage.
+        counts: Counter = Counter(job.tokens)
 
         def sample_one(logprobs: Any) -> Any:
             token, _distribution = _sample_from_logits(
